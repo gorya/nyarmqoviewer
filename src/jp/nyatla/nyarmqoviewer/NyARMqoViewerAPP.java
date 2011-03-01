@@ -22,12 +22,16 @@ import java.util.*;
 import javax.media.Buffer;
 
 import javax.media.opengl.*;
+
 import org.w3c.dom.*;
 import com.sun.opengl.util.Animator;
 
 import jp.nyatla.kGLModel.*;
 import jp.nyatla.kGLModel.contentprovider.*;
 import jp.nyatla.nyartoolkit.core.NyARCode;
+import jp.nyatla.nyartoolkit.core.param.NyARParam;
+import jp.nyatla.nyartoolkit.core.transmat.NyARTransMatResult;
+import jp.nyatla.nyartoolkit.detector.NyARSingleDetectMarker;
 import jp.nyatla.nyartoolkit.jmf.utils.*;
 import jp.nyatla.nyartoolkit.jogl.utils.*;
 import jp.nyatla.nyartoolkit.*;
@@ -140,13 +144,13 @@ public class NyARMqoViewerAPP implements GLEventListener,JmfCaptureListener
     private KGLModelData model_data; // kei add
     private ContentProvider content_provider;
     private Animator animator;
-    private GLNyARRaster_RGB cap_image;
-    private JmfCameraCapture capture;
+    private JmfNyARRaster_RGB cap_image;
+    private JmfCaptureDevice capture;
     private GL gl;
     //NyARToolkit関係
     private NyARGLUtil glnya;
-    private GLNyARSingleDetectMarker nya;
-    private GLNyARParam ar_param;
+    private NyARSingleDetectMarker nya;
+    private NyARParam ar_param;
 
     /**
      * お手軽HttpInputStream生成関数
@@ -178,18 +182,21 @@ public class NyARMqoViewerAPP implements GLEventListener,JmfCaptureListener
 	int SCR_Y=this.app_param.screen_y;
 	//キャプチャの準備
 	Logger.logln("キャプチャデバイスを準備しています.");
-	this.capture=new JmfCameraCapture(SCR_X,SCR_Y,i_param.frame_rate,JmfCameraCapture.PIXEL_FORMAT_RGB);
-	this.capture.setCaptureListener(this);
+	this.capture=(new JmfCaptureDeviceList()).getDevice(0);
+	this.capture.setOnCapture(this);
+	this.capture.setCaptureFormat(SCR_X, SCR_Y, app_param.frame_rate);
 	//NyARToolkitの準備
 	Logger.logln("NyARToolkitを準備しています.");
-	this.ar_param=new GLNyARParam();
-	this.ar_param.loadFromARFile(createHttpStream(this.app_param.base_url,this.app_param.cparam_identifier));
-	this.ar_param.changeSize(SCR_X,SCR_Y);
+	this.ar_param=new NyARParam();
+	this.ar_param.loadARParam(createHttpStream(this.app_param.base_url,this.app_param.cparam_identifier));
+	this.ar_param.changeScreenSize(SCR_X,SCR_Y);
+	// RGBラスタを作成
+	this.cap_image=new JmfNyARRaster_RGB(this.ar_param, this.capture.getCaptureFormat());
 	//検出マーカーの設定
 	NyARCode ar_code  =new NyARCode(16,16);
-	ar_code.loadFromARFile(createHttpStream(this.app_param.base_url,this.app_param.arcode_identifier));
+	ar_code.loadARPatt(createHttpStream(this.app_param.base_url,this.app_param.arcode_identifier));
 	//マーカーDetecterの作成
-	this.nya=new GLNyARSingleDetectMarker(this.ar_param,ar_code,this.app_param.marker_size);	
+	this.nya=new NyARSingleDetectMarker(this.ar_param,ar_code,this.app_param.marker_size, this.cap_image.getBufferType());	
 	//コンテンツプロバイダを作成
 	try{
 	    this.content_provider=new HttpContentProvider(this.app_param.main_identifier);
@@ -229,9 +236,7 @@ public class NyARMqoViewerAPP implements GLEventListener,JmfCaptureListener
 	//NyARToolkitの準備
 	try{
 	    //OpenGLユーティリティを作成
-	    glnya=new NyARGLUtil(gl,ar_param);
-	    //GL対応�のRGBラスタ
-	    cap_image=new GLNyARRaster_RGB(gl,ar_param);
+	    glnya=new NyARGLUtil(gl);
 	    //キャプチャ開始
 	    Logger.logln("キャプチャを開始します.");
 	    capture.start();
@@ -253,7 +258,7 @@ public class NyARMqoViewerAPP implements GLEventListener,JmfCaptureListener
 	gl.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT);
 	gl.glViewport(0, 0,  width, height);
 
-	//視体積�?設�?
+	//視体積の設定
 	gl.glMatrixMode(GL.GL_PROJECTION);
 	gl.glLoadIdentity();
 	gl.glFrustum(-1.0f, 1.0f, -ratio, ratio,5.0f,40.0f);
@@ -267,26 +272,30 @@ public class NyARMqoViewerAPP implements GLEventListener,JmfCaptureListener
     {
 
 	try{
-	    if(!cap_image.hasData()){
+	    if(!cap_image.hasBuffer()){
 		return;
 	    }    
 	    gl.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT); // Clear the buffers for new frame.          
-	    //画像チェ�?��してマ�?カー探して、背景を書�?
+	    //画像チェックしてマーカー探して、背景を書く
 	    boolean is_marker_exist;
 	    synchronized(cap_image){
 		is_marker_exist=nya.detectMarkerLite(cap_image,this.threshold);
 		//背景
 		glnya.drawBackGround(cap_image, 1.0);
 	    }
-	    //あったら立方体を書�?
+	    //あったら立方体を書く
 	    if(is_marker_exist){
+		double[] glmat = new double[16];
 		// Projection transformation.
 		gl.glMatrixMode(GL.GL_PROJECTION);
-		gl.glLoadMatrixd(ar_param.getCameraFrustumRH(),0);
+		glnya.toCameraFrustumRH(ar_param, glmat);
 		gl.glMatrixMode(GL.GL_MODELVIEW);
 		// Viewing transformation.
 		gl.glLoadIdentity();
-		gl.glLoadMatrixd(nya.getCameraViewRH(),0);
+		NyARTransMatResult nya_transmat_result = new NyARTransMatResult();
+		nya.getTransmationMatrix(nya_transmat_result);
+		glnya.toCameraViewRH(nya_transmat_result, glmat);
+		gl.glLoadMatrixd(glmat,0);
 
 		// -------v------ kei add
 		gl.glTexEnvf(GL.GL_TEXTURE_ENV, GL.GL_TEXTURE_ENV_MODE, GL.GL_MODULATE);
@@ -307,7 +316,7 @@ public class NyARMqoViewerAPP implements GLEventListener,JmfCaptureListener
     {
 	try{
 	    synchronized(cap_image){
-		cap_image.setBuffer(i_buffer, true);
+		cap_image.setBuffer(i_buffer);
 	    }
 	}catch(Exception e){
 	    e.printStackTrace();
